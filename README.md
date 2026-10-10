@@ -1,299 +1,272 @@
-# Программа на Python для удаления приложений в Ubuntu
+# README.md
 
-Ниже — безопасный скрипт с меню и подтверждением. Он делает всё то же, что мы делали руками: `apt purge`, `autoremove`, чистка конфигов и кеша.
+```markdown
+# uninstall_app
 
-## Вариант 1. Простой интерактивный скрипт
+Утилита для полного удаления приложений в **Ubuntu/Debian** и **Fedora/RHEL**.
+Одной командой удаляет сам пакет, его системные конфиги, ненужные зависимости,
+пользовательские файлы и кеш.
 
-Сохрани как `uninstall_app.py`:
+---
 
-```python
-#!/usr/bin/env python3
-"""
-uninstall_app.py — безопасное удаление приложения в Ubuntu/Debian.
+## Возможности
 
-Что делает:
-  1. Проверяет, установлен ли пакет.
-  2. Показывает, что именно будет удалено.
-  3. Удаляет пакет (apt purge).
-  4. Чистит зависимости (apt autoremove --purge).
-  5. Опционально удаляет пользовательские конфиги/кеш.
-  6. Опционально чистит кеш apt.
+- 🔍 Автоматическое определение пакетного менеджера (`apt/dpkg` или `dnf/rpm`)
+- 🗑️ Полное удаление пакета вместе с системными конфигами
+- 🧹 Очистка ненужных зависимостей (`autoremove`)
+- 🏠 Удаление пользовательских данных (`~/.config`, `~/.cache`, `~/.local/share`)
+- 💾 Очистка кеша пакетного менеджера
+- ✅ Проверка остатков после удаления
+- 🛡️ Подтверждение каждого опасного шага
+- ⚡ Запуск одной командой через `make`
 
-Запуск:
-    sudo python3 uninstall_app.py
-или (рекомендуется):
-    sudo python3 uninstall_app.py <имя_пакета>
-"""
+---
 
-import os
-import sys
-import shutil
-import subprocess
-from pathlib import Path
+## Поддерживаемые системы
 
+| Дистрибутив       | Пакетный менеджер | Статус |
+|-------------------|-------------------|--------|
+| Ubuntu / Debian / Mint | apt + dpkg   | ✅     |
+| Fedora / RHEL / CentOS / Rocky / AlmaLinux | dnf + rpm | ✅ |
 
-# ---------------------- Утилиты ----------------------
+---
 
-def run(cmd, check=True, capture=False):
-    """Запустить команду. По умолчанию выводит в терминал."""
-    print(f"\n$ {' '.join(cmd)}")
-    if capture:
-        result = subprocess.run(cmd, text=True, capture_output=True)
-        if check and result.returncode != 0:
-            print(result.stderr.strip())
-            sys.exit(f"Ошибка выполнения: {' '.join(cmd)}")
-        return result.stdout
-    else:
-        result = subprocess.run(cmd)
-        if check and result.returncode != 0:
-            sys.exit(f"Ошибка выполнения: {' '.join(cmd)}")
-        return None
+## Установка
 
+Скопируй в одну папку два файла:
 
-def require_root():
-    if os.geteuid() != 0:
-        sys.exit("Запусти от root: sudo python3 uninstall_app.py <пакет>")
+- `uninstall_app.py`
+- `Makefile`
 
-
-def ask_yes_no(prompt, default=False):
-    suffix = " [Y/n]: " if default else " [y/N]: "
-    answer = input(prompt + suffix).strip().lower()
-    if not answer:
-        return default
-    return answer in ("y", "yes", "д", "да")
-
-
-def is_installed(pkg: str) -> bool:
-    result = subprocess.run(
-        ["dpkg", "-s", pkg],
-        text=True, capture_output=True
-    )
-    return result.returncode == 0
-
-
-def get_home_of_user() -> Path:
-    """Дом. каталог пользователя, который вызвал sudo."""
-    sudo_user = os.environ.get("SUDO_USER")
-    if sudo_user:
-        return Path(f"/home/{sudo_user}")
-    return Path.home()
-
-
-# ---------------------- Основная логика ----------------------
-
-def show_package_info(pkg: str):
-    print(f"\n=== Информация о пакете '{pkg}' ===")
-    info = run(
-        ["apt-cache", "show", pkg],
-        check=False, capture=True
-    )
-    if info:
-        for line in info.splitlines():
-            if line.startswith(("Package:", "Version:", "Description:", "Section:")):
-                print("  " + line)
-
-    print("\nЗависимости, которые могут стать ненужными:")
-    run(["apt", "autoremove", "--dry-run", "--purge"], check=False)
-
-
-def purge_package(pkg: str):
-    print(f"\n=== Удаление пакета '{pkg}' (apt purge) ===")
-    run(["apt", "purge", "-y", pkg])
-
-
-def autoremove():
-    print("\n=== Удаление ненужных зависимостей ===")
-    run(["apt", "autoremove", "--purge", "-y"])
-
-
-def clean_apt_cache():
-    print("\n=== Чистка кеша apt ===")
-    run(["apt", "clean"])
-    run(["apt", "autoclean"])
-
-
-def remove_user_files(pkg: str):
-    """Удалить пользовательские конфиги и кеш с эвристикой по имени."""
-    home = get_home_of_user()
-    print(f"\n=== Удаление пользовательских файлов в {home} ===")
-
-    candidates = [
-        home / ".config" / pkg,
-        home / ".cache" / pkg,
-        home / ".local" / "share" / pkg,
-    ]
-
-    # Иногда имя каталога = имя пакета без префикса
-    short = pkg.replace("-desktop", "").replace("-bin", "")
-    if short != pkg:
-        candidates += [
-            home / ".config" / short,
-            home / ".cache" / short,
-            home / ".local" / "share" / short,
-        ]
-
-    found_any = False
-    for path in candidates:
-        if path.exists():
-            found_any = True
-            print(f"  Найдено: {path}")
-            if ask_yes_no(f"    Удалить {path}?", default=False):
-                if path.is_dir():
-                    shutil.rmtree(path, ignore_errors=True)
-                else:
-                    path.unlink(missing_ok=True)
-                print("    Удалено.")
-    if not found_any:
-        print("  Ничего не найдено.")
-
-
-def check_leftovers(pkg: str):
-    print(f"\n=== Проверка остатков '{pkg}' ===")
-    out = run(["dpkg", "-l", pkg], check=False, capture=True)
-    if out and "ii" in out:
-        print("  ⚠ Пакет всё ещё в списке установленных.")
-    else:
-        print("  ✅ Пакет удалён из dpkg.")
-
-    which = shutil.which(pkg)
-    if which:
-        print(f"  ⚠ Найден бинарник в PATH: {which}")
-    else:
-        print("  ✅ Бинарник не найден в PATH.")
-
-
-# ---------------------- Точка входа ----------------------
-
-def main():
-    require_root()
-
-    if len(sys.argv) > 1:
-        pkg = sys.argv[1].strip()
-    else:
-        pkg = input("Введи имя пакета для удаления (например sublime-text): ").strip()
-
-    if not pkg:
-        sys.exit("Имя пакета не задано.")
-
-    if not is_installed(pkg):
-        print(f"Пакет '{pkg}' не установлен (dpkg его не видит).")
-        if not ask_yes_no("Всё равно попробовать удалить конфиги и кеш?"):
-            sys.exit(0)
-        remove_user_files(pkg)
-        return
-
-    show_package_info(pkg)
-
-    print("\n⚠ Внимание: apt purge удалит пакет и его системные конфиги.")
-    if not ask_yes_no(f"Продолжить удаление '{pkg}'?", default=False):
-        sys.exit("Отменено пользователем.")
-
-    purge_package(pkg)
-    autoremove()
-
-    if ask_yes_no("Удалить пользовательские конфиги и кеш?", default=True):
-        remove_user_files(pkg)
-
-    if ask_yes_no("Очистить кеш apt?", default=True):
-        clean_apt_cache()
-
-    check_leftovers(pkg)
-    print("\n✅ Готово.")
-
-
-if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        print("\nПрервано пользователем.")
-        sys.exit(130)
-```
-
-## Как пользоваться
+Затем сделай скрипт исполняемым:
 
 ```bash
-# сделать исполняемым
-chmod +x uninstall_app.py
+make
+```
 
-# удалить конкретный пакет
-sudo python3 uninstall_app.py sublime-text
+или
+
+```bash
+chmod +x uninstall_app.py
+```
+
+Никаких зависимостей ставить не нужно — только Python 3 (он есть в обеих системах по умолчанию).
+
+---
+
+## Использование
+
+### Через Makefile (рекомендуется)
+
+```bash
+# Удалить программу
+make delete <имя_пакета>
+
+# Примеры
+make delete sublime-text
+make delete firefox
+make delete vlc
+
+# Интерактивный режим — спросит имя пакета
+make run
+
+# Справка
+make help
+
+# Убрать временные файлы Python
+make clean
+```
+
+### Напрямую
+
+```bash
+sudo ./uninstall_app.py <имя_пакета>
 
 # или без аргумента — спросит имя
-sudo python3 uninstall_app.py
+sudo ./uninstall_app.py
 ```
 
-Пример работы:
+> **Важно:** скрипт требует root, потому что работает с системным пакетным менеджером.
+
+---
+
+## Что происходит при запуске
+
+1. Определяется пакетный менеджер системы (apt или dnf).
+2. Проверяется, установлен ли указанный пакет.
+3. Показывается информация о пакете и список зависимостей, которые могут стать ненужными.
+4. Спрашивается подтверждение на удаление.
+5. Выполняется:
+   - `apt purge -y <pkg>` **или** `dnf remove -y <pkg>`
+   - `apt autoremove --purge -y` **или** `dnf autoremove -y`
+6. Опционально удаляются пользовательские файлы:
+   - `~/.config/<pkg>`
+   - `~/.cache/<pkg>`
+   - `~/.local/share/<pkg>`
+7. Опционально чистится кеш пакетного менеджера.
+8. Проверяется, что пакет действительно удалён.
+
+---
+
+## Пример работы
+
+### Ubuntu
 
 ```
-$ sudo python3 uninstall_app.py sublime-text
+$ make delete sublime-text
+Пакетный менеджер: apt / dpkg
 
-=== Информация о пакете 'sublime-text' ===
+=== Информация о 'sublime-text' ===
   Package: sublime-text
   Version: 4200
-  ...
-⚠ Внимание: apt purge удалит пакет и его системные конфиги.
-Продолжить удаление 'sublime-text'? [y/N]: y
-...
+  Description: Sublime Text editor
+
+⚠ Будет удалён пакет 'sublime-text' и его системные конфиги.
+Продолжить? [y/N]: y
+
+$ apt purge -y sublime-text
+$ apt autoremove --purge -y
+
 Удалить пользовательские конфиги и кеш? [Y/n]: y
-Очистить кеш apt? [Y/n]: y
+  Найдено: /home/user/.config/sublime-text
+    Удалить /home/user/.config/sublime-text? [y/N]: y
+    Удалено.
+
+Очистить кеш пакетного менеджера? [Y/n]: y
+
+=== Проверка остатков ===
+  ✅ Пакет удалён из dpkg.
+
 ✅ Готово.
 ```
 
-## Вариант 2. Минималистичный скрипт (без вопросов)
+### Fedora
 
-Если хочется одну команду без диалогов:
+```
+$ make delete firefox
+Пакетный менеджер: dnf / rpm
 
-```python
-#!/usr/bin/env python3
-import os, sys, subprocess, shutil
-from pathlib import Path
+=== Информация о 'firefox' ===
+  Name         : firefox
+  Version      : 128.3.0
+  Summary      : Mozilla Firefox Web browser
 
-def run(*cmd):
-    print("$", " ".join(cmd))
-    subprocess.run(cmd, check=True)
+⚠ Будет удалён пакет 'firefox' и его системные конфиги.
+Продолжить? [y/N]: y
 
-def main():
-    if os.geteuid() != 0:
-        sys.exit("Запусти с sudo")
-    if len(sys.argv) < 2:
-        sys.exit("Использование: sudo python3 uninstall.py <пакет>")
+$ dnf remove -y firefox
+$ dnf autoremove -y
 
-    pkg = sys.argv[1]
-    home = Path(f"/home/{os.environ.get('SUDO_USER', 'root')}")
+Удалить пользовательские конфиги и кеш? [Y/n]: y
+Очистить кеш пакетного менеджера? [Y/n]: y
 
-    run("apt", "purge", "-y", pkg)
-    run("apt", "autoremove", "--purge", "-y")
-    run("apt", "clean")
+=== Проверка остатков ===
+  ✅ Пакет удалён из rpm.
 
-    for sub in ("config", "cache", "local/share"):
-        path = home / "." / sub / pkg
-        if path.exists():
-            print("Удаляю:", path)
-            shutil.rmtree(path, ignore_errors=True)
-
-    print("Готово.")
-
-if __name__ == "__main__":
-    main()
+✅ Готово.
 ```
 
-Запуск:
+---
+
+## Команды, которые выполняет скрипт
+
+| Действие                  | Ubuntu (apt)                        | Fedora (dnf)              |
+|---------------------------|-------------------------------------|---------------------------|
+| Проверка установки        | `dpkg -s <pkg>`                     | `rpm -q <pkg>`            |
+| Удаление пакета           | `apt purge -y <pkg>`                | `dnf remove -y <pkg>`     |
+| Очистка зависимостей      | `apt autoremove --purge -y`         | `dnf autoremove -y`       |
+| Очистка кеша              | `apt clean && apt autoclean`        | `dnf clean all`           |
+| Проверка остатков         | `dpkg -l <pkg>`                     | `rpm -q <pkg>`            |
+
+---
+
+## Структура проекта
+
+```
+.
+├── uninstall_app.py    # основной скрипт
+├── Makefile            # удобные цели make
+└── README.md           # этот файл
+```
+
+---
+
+## Безопасность
+
+- ⚠️ **Не удаляй системные пакеты** (`systemd`, `apt`, `dnf`, `libc6`, `glibc`, `kernel` и т.п.) — можно сломать систему.
+- Скрипт рассчитан на обычные приложения: браузеры, редакторы, утилиты, мессенджеры.
+- Все опасные действия требуют подтверждения (`[y/N]`).
+- Пользовательские файлы удаляются **только** если ты явно ответишь `y` на соответствующий вопрос.
+- `sudo` обязателен, потому что работа идёт с системным пакетным менеджером.
+
+---
+
+## Как найти точное имя пакета
+
+### Ubuntu
 
 ```bash
-sudo python3 uninstall.py sublime-text
+apt list --installed | grep -i <часть_имени>
+dpkg -l | grep -i <часть_имени>
 ```
 
-## На что обратить внимание
+### Fedora
 
-1. **Скрипт требует root** — иначе apt не сможет удалять пакеты. Проверка `os.geteuid() != 0` это ловит.
-2. **Пользовательские файлы** удаляются только с подтверждением (в первом варианте). Пути строятся по эвристике: `~/.config/<pkg>`, `~/.cache/<pkg>`, `~/.local/share/<pkg>`.
-3. **`SUDO_USER`** используется, чтобы найти домашний каталог обычного пользователя, а не `/root`.
-4. **`apt purge`** удаляет системные конфиги пакета, но **не** пользовательские — их чистит отдельная функция.
-5. **Не запускай для критичных пакетов** (`systemd`, `apt`, `libc6` и т.п.) — можно сломать систему. Скрипт для обычных приложений вроде браузеров, редакторов, утилит.
+```bash
+dnf list installed | grep -i <часть_имени>
+rpm -qa | grep -i <часть_имени>
+```
 
-Могу дописать:
+Например:
 
-- поддержку удаления **snap** и **flatpak** пакетов,
-- поиск по части имени (`apt list --installed | grep ...`),
-- логирование всех действий в файл,
-- GUI на `tkinter`.
+```bash
+rpm -qa | grep -i chrome
+```
+
+---
+
+## Возможные проблемы
+
+**1. `dpkg: warning: package not found` или `package <pkg> is not installed`**
+Пакет уже удалён или имя указано неверно. Проверь имя командой из раздела выше.
+
+**2. Скрипт не находит пользовательские файлы**
+Каталог приложения может называться иначе, чем пакет. Например, пакет `google-chrome-stable`, а каталог `~/.config/google-chrome`. Посмотри вручную:
+
+```bash
+ls ~/.config | grep -i <часть_имени>
+ls ~/.cache | grep -i <часть_имени>
+```
+
+**3. `permission denied`**
+Запусти через `sudo`. Make-цель `delete` уже использует `sudo` внутри.
+
+**4. Fedora: пакет установлен, но `dnf remove` говорит «No match»**
+Иногда пакет есть в rpm, но не в dnf (например, установлен вручную). Проверь:
+
+```bash
+rpm -q <pkg>
+sudo rpm -e <pkg>
+```
+
+---
+
+## Лицензия
+
+MIT — используй как хочешь.
+```
+
+---
+
+Ключевые изменения по сравнению с прошлым README:
+
+1. **Заголовок и описание** — теперь про две системы, а не только Ubuntu.
+2. **Таблица поддерживаемых дистрибутивов** — сразу видно, где работает.
+3. **Использование через `make`** вынесено на первое место — это основной способ.
+4. **Раздел «Что происходит при запуске»** — пошаговое описание логики.
+5. **Два примера работы** — Ubuntu и Fedora рядом.
+6. **Сводная таблица команд** — что делает скрипт на каждой системе.
+7. **Структура проекта** — три файла.
+8. **Как найти точное имя пакета** — команды для apt и dnf.
+9. **Возможные проблемы** — 4 типовые ситуации.
+10. **Безопасность** — предупреждение про системные пакеты.
