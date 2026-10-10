@@ -1,19 +1,11 @@
 #!/usr/bin/env python3
 """
-uninstall_app.py — безопасное удаление приложения в Ubuntu/Debian.
+uninstall_app.py — безопасное удаление приложения.
+Поддержка: Ubuntu/Debian (apt/dpkg) и Fedora/RHEL (dnf/rpm).
 
-Что делает:
-  1. Проверяет, установлен ли пакет.
-  2. Показывает, что именно будет удалено.
-  3. Удаляет пакет (apt purge).
-  4. Чистит зависимости (apt autoremove --purge).
-  5. Опционально удаляет пользовательские конфиги/кеш.
-  6. Опционально чистит кеш apt.
-
-Запуск:
-    sudo python3 uninstall_app.py
-или (рекомендуется):
+Использование:
     sudo python3 uninstall_app.py <имя_пакета>
+    sudo ./uninstall_app.py <имя_пакета>
 """
 
 import os
@@ -29,92 +21,130 @@ def run(cmd, check=True, capture=False):
     """Запустить команду. По умолчанию выводит в терминал."""
     print(f"\n$ {' '.join(cmd)}")
     if capture:
-        result = subprocess.run(cmd, text=True, capture_output=True)
-        if check and result.returncode != 0:
-            print(result.stderr.strip())
-            sys.exit(f"Ошибка выполнения: {' '.join(cmd)}")
-        return result.stdout
-    else:
-        result = subprocess.run(cmd)
-        if check and result.returncode != 0:
-            sys.exit(f"Ошибка выполнения: {' '.join(cmd)}")
-        return None
+        r = subprocess.run(cmd, text=True, capture_output=True)
+        if check and r.returncode != 0:
+            print(r.stderr.strip())
+            sys.exit(f"Ошибка: {' '.join(cmd)}")
+        return r.stdout
+    r = subprocess.run(cmd)
+    if check and r.returncode != 0:
+        sys.exit(f"Ошибка: {' '.join(cmd)}")
+    return None
 
 
 def require_root():
     if os.geteuid() != 0:
-        sys.exit("Запусти от root: sudo python3 uninstall_app.py <пакет>")
+        sys.exit("Запусти от root: sudo ./uninstall_app.py <пакет>")
 
 
 def ask_yes_no(prompt, default=False):
     suffix = " [Y/n]: " if default else " [y/N]: "
-    answer = input(prompt + suffix).strip().lower()
-    if not answer:
-        return default
-    return answer in ("y", "yes", "д", "да")
+    a = input(prompt + suffix).strip().lower()
+    return default if not a else a in ("y", "yes", "д", "да")
 
 
-def is_installed(pkg: str) -> bool:
-    result = subprocess.run(
-        ["dpkg", "-s", pkg],
-        text=True, capture_output=True
-    )
-    return result.returncode == 0
+def get_user_home() -> Path:
+    """Домашний каталог пользователя, вызвавшего sudo."""
+    u = os.environ.get("SUDO_USER")
+    return Path(f"/home/{u}") if u else Path.home()
 
 
-def get_home_of_user() -> Path:
-    """Дом. каталог пользователя, который вызвал sudo."""
-    sudo_user = os.environ.get("SUDO_USER")
-    if sudo_user:
-        return Path(f"/home/{sudo_user}")
-    return Path.home()
+# ---------------------- Бэкенды пакетных менеджеров ----------------------
+
+class AptBackend:
+    """Ubuntu / Debian / Mint."""
+    name = "apt / dpkg"
+
+    def is_installed(self, pkg):
+        return subprocess.run(
+            ["dpkg", "-s", pkg], capture_output=True
+        ).returncode == 0
+
+    def info(self, pkg):
+        out = run(["apt-cache", "show", pkg], check=False, capture=True)
+        if out:
+            for line in out.splitlines():
+                if line.startswith(("Package:", "Version:", "Description:", "Section:")):
+                    print("  " + line)
+        print("\nЗависимости, которые могут стать ненужными:")
+        run(["apt", "autoremove", "--dry-run", "--purge"], check=False)
+
+    def purge(self, pkg):
+        run(["apt", "purge", "-y", pkg])
+
+    def autoremove(self):
+        run(["apt", "autoremove", "--purge", "-y"])
+
+    def clean(self):
+        run(["apt", "clean"])
+        run(["apt", "autoclean"])
+
+    def leftover(self, pkg):
+        out = run(["dpkg", "-l", pkg], check=False, capture=True)
+        if out and any(l.startswith("ii") for l in out.splitlines()):
+            print("  ⚠ Пакет всё ещё в dpkg.")
+        else:
+            print("  ✅ Пакет удалён из dpkg.")
 
 
-# ---------------------- Основная логика ----------------------
+class DnfBackend:
+    """Fedora / RHEL / CentOS / Rocky / AlmaLinux."""
+    name = "dnf / rpm"
 
-def show_package_info(pkg: str):
-    print(f"\n=== Информация о пакете '{pkg}' ===")
-    info = run(
-        ["apt-cache", "show", pkg],
-        check=False, capture=True
-    )
-    if info:
-        for line in info.splitlines():
-            if line.startswith(("Package:", "Version:", "Description:", "Section:")):
-                print("  " + line)
+    def is_installed(self, pkg):
+        return subprocess.run(
+            ["rpm", "-q", pkg], capture_output=True
+        ).returncode == 0
 
-    print("\nЗависимости, которые могут стать ненужными:")
-    run(["apt", "autoremove", "--dry-run", "--purge"], check=False)
+    def info(self, pkg):
+        out = run(["dnf", "info", pkg], check=False, capture=True)
+        if out:
+            for line in out.splitlines():
+                if line.startswith(("Name", "Version", "Release", "Summary", "Size")):
+                    print("  " + line)
+
+    def purge(self, pkg):
+        # dnf remove удаляет пакет и его файлы
+        run(["dnf", "remove", "-y", pkg])
+        # подчистим системные конфиги, если остались (аналог apt purge)
+        etc_dir = Path("/etc") / pkg
+        if etc_dir.exists() and etc_dir.is_dir():
+            print(f"\nНайден /etc/{pkg}, удаляю…")
+            shutil.rmtree(etc_dir, ignore_errors=True)
+
+    def autoremove(self):
+        run(["dnf", "autoremove", "-y"])
+
+    def clean(self):
+        run(["dnf", "clean", "all"])
+
+    def leftover(self, pkg):
+        r = subprocess.run(["rpm", "-q", pkg], capture_output=True, text=True)
+        if r.returncode == 0:
+            print(f"  ⚠ Пакет всё ещё установлен: {r.stdout.strip()}")
+        else:
+            print("  ✅ Пакет удалён из rpm.")
 
 
-def purge_package(pkg: str):
-    print(f"\n=== Удаление пакета '{pkg}' (apt purge) ===")
-    run(["apt", "purge", "-y", pkg])
+def detect_backend():
+    if shutil.which("apt") and shutil.which("dpkg"):
+        return AptBackend()
+    if shutil.which("dnf") and shutil.which("rpm"):
+        return DnfBackend()
+    sys.exit("Не найден поддерживаемый пакетный менеджер (apt/dpkg или dnf/rpm).")
 
 
-def autoremove():
-    print("\n=== Удаление ненужных зависимостей ===")
-    run(["apt", "autoremove", "--purge", "-y"])
+# ---------------------- Пользовательские файлы ----------------------
 
-
-def clean_apt_cache():
-    print("\n=== Чистка кеша apt ===")
-    run(["apt", "clean"])
-    run(["apt", "autoclean"])
-
-
-def remove_user_files(pkg: str):
-    """Удалить пользовательские конфиги и кеш с эвристикой по имени."""
-    home = get_home_of_user()
-    print(f"\n=== Удаление пользовательских файлов в {home} ===")
+def remove_user_files(pkg):
+    home = get_user_home()
+    print(f"\n=== Пользовательские файлы в {home} ===")
 
     candidates = [
         home / ".config" / pkg,
         home / ".cache" / pkg,
         home / ".local" / "share" / pkg,
     ]
-
-    # Иногда имя каталога = имя пакета без префикса
     short = pkg.replace("-desktop", "").replace("-bin", "")
     if short != pkg:
         candidates += [
@@ -123,72 +153,61 @@ def remove_user_files(pkg: str):
             home / ".local" / "share" / short,
         ]
 
-    found_any = False
-    for path in candidates:
-        if path.exists():
-            found_any = True
-            print(f"  Найдено: {path}")
-            if ask_yes_no(f"    Удалить {path}?", default=False):
-                if path.is_dir():
-                    shutil.rmtree(path, ignore_errors=True)
+    found = False
+    for p in candidates:
+        if p.exists():
+            found = True
+            print(f"  Найдено: {p}")
+            if ask_yes_no(f"    Удалить {p}?", default=False):
+                if p.is_dir():
+                    shutil.rmtree(p, ignore_errors=True)
                 else:
-                    path.unlink(missing_ok=True)
+                    p.unlink(missing_ok=True)
                 print("    Удалено.")
-    if not found_any:
+    if not found:
         print("  Ничего не найдено.")
 
 
-def check_leftovers(pkg: str):
-    print(f"\n=== Проверка остатков '{pkg}' ===")
-    out = run(["dpkg", "-l", pkg], check=False, capture=True)
-    if out and "ii" in out:
-        print("  ⚠ Пакет всё ещё в списке установленных.")
-    else:
-        print("  ✅ Пакет удалён из dpkg.")
-
-    which = shutil.which(pkg)
-    if which:
-        print(f"  ⚠ Найден бинарник в PATH: {which}")
-    else:
-        print("  ✅ Бинарник не найден в PATH.")
-
-
-# ---------------------- Точка входа ----------------------
+# ---------------------- main ----------------------
 
 def main():
     require_root()
+    backend = detect_backend()
+    print(f"Пакетный менеджер: {backend.name}")
 
     if len(sys.argv) > 1:
         pkg = sys.argv[1].strip()
     else:
-        pkg = input("Введи имя пакета для удаления (например sublime-text): ").strip()
+        pkg = input("Имя пакета для удаления: ").strip()
 
     if not pkg:
         sys.exit("Имя пакета не задано.")
 
-    if not is_installed(pkg):
-        print(f"Пакет '{pkg}' не установлен (dpkg его не видит).")
-        if not ask_yes_no("Всё равно попробовать удалить конфиги и кеш?"):
+    if not backend.is_installed(pkg):
+        print(f"\nПакет '{pkg}' не найден в системе.")
+        if not ask_yes_no("Всё равно удалить конфиги и кеш?"):
             sys.exit(0)
         remove_user_files(pkg)
         return
 
-    show_package_info(pkg)
+    print(f"\n=== Информация о '{pkg}' ===")
+    backend.info(pkg)
 
-    print("\n⚠ Внимание: apt purge удалит пакет и его системные конфиги.")
-    if not ask_yes_no(f"Продолжить удаление '{pkg}'?", default=False):
-        sys.exit("Отменено пользователем.")
+    print(f"\n⚠ Будет удалён пакет '{pkg}' и его системные конфиги.")
+    if not ask_yes_no("Продолжить?", default=False):
+        sys.exit("Отменено.")
 
-    purge_package(pkg)
-    autoremove()
+    backend.purge(pkg)
+    backend.autoremove()
 
     if ask_yes_no("Удалить пользовательские конфиги и кеш?", default=True):
         remove_user_files(pkg)
 
-    if ask_yes_no("Очистить кеш apt?", default=True):
-        clean_apt_cache()
+    if ask_yes_no("Очистить кеш пакетного менеджера?", default=True):
+        backend.clean()
 
-    check_leftovers(pkg)
+    print("\n=== Проверка остатков ===")
+    backend.leftover(pkg)
     print("\n✅ Готово.")
 
 
@@ -196,5 +215,5 @@ if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print("\nПрервано пользователем.")
+        print("\nПрервано.")
         sys.exit(130)
